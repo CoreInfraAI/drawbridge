@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "drawbridge.schema.json",
+  "title": "Drawbridge configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "key_file",
+    "credentials_dir",
+    "domain_root",
+    "domain_drawbridge",
+    "domains"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional JSON Schema reference used by editors/validators; ignored by Drawbridge."
+    },
+    "key_file": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path to the Drawbridge secret key file (as produced by `drawbridge -keygen`)."
+    },
+    "credentials_dir": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Directory containing enrolled credential record JSON files."
+    },
+    "tls_cert_file": {
+      "type": "string",
+      "description": "Path to the TLS certificate PEM file. If both `tls_cert_file` and `tls_key_file` are empty or omitted, Drawbridge uses ACME."
+    },
+    "tls_key_file": {
+      "type": "string",
+      "description": "Path to the TLS private key PEM file. If both `tls_cert_file` and `tls_key_file` are empty or omitted, Drawbridge uses ACME."
+    },
+    "domain_root": {
+      "type": "string",
+      "format": "hostname",
+      "minLength": 1,
+      "description": "Root domain for internal services; also used as the cookie Domain for `drawbridge_session`."
+    },
+    "domain_drawbridge": {
+      "type": "string",
+      "format": "hostname",
+      "minLength": 1,
+      "description": "Drawbridge UI/authentication hostname; must be the same as or a subdomain of `domain_root`."
+    },
+    "domains": {
+      "type": "object",
+      "minProperties": 1,
+      "description": "Map of hostname -> per-domain proxy and access configuration.",
+      "propertyNames": {
+        "type": "string",
+        "format": "hostname"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/domain_config"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["tls_cert_file"]
+      },
+      "then": {
+        "required": ["tls_key_file"]
+      }
+    },
+    {
+      "if": {
+        "required": ["tls_key_file"]
+      },
+      "then": {
+        "required": ["tls_cert_file"]
+      }
+    }
+  ],
+  "$defs": {
+    "domain_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["proxy_to_url", "allowed_users"],
+      "properties": {
+        "proxy_to_url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://",
+          "description": "Upstream URL to proxy to (must be http or https)."
+        },
+        "allowed_users": {
+          "type": "array",
+          "uniqueItems": true,
+          "description": "List of allowed user identifiers for this host (typically emails); matching is case-insensitive.",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}

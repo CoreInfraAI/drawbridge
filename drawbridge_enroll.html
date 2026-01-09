@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Drawbridge Enrollment</title>
+    <style>
+      body {
+        max-width: 64rem;
+      }
+
+      label {
+        display: block;
+        margin-top: 1rem;
+        margin-bottom: 0.25rem;
+      }
+
+      input {
+        width: 20rem;
+        padding: 0.25rem 0.5rem;
+      }
+
+      pre {
+        min-width: 20rem;
+        padding: 0.25rem 0.5rem;
+        outline: thin dotted gray;
+        overflow: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Drawbridge Enrollment</h1>
+    <p>
+      This creates a new WebAuthn credential in your authenticator. After
+      creation, you’ll get an enrollment blob to send to your administrator.
+    </p>
+
+    <form id="enrollForm">
+      <p>
+        <label for="displayname">Name:</label>
+        <input
+          id="displayname"
+          autocomplete="name"
+          placeholder="Alice B. Carroll"
+          required
+        />
+      </p>
+
+      <p>
+        <label for="email">Email:</label>
+        <input
+          id="email"
+          type="email"
+          autocomplete="email"
+          placeholder="alice@example.com"
+          required
+        />
+      </p>
+
+      <p>
+        <button id="enroll" type="submit">Create credential</button>
+      </p>
+    </form>
+
+    <div id="result" hidden>
+      <p>Copy and send this to your administrator:</p>
+      <pre id="blob"></pre>
+      <button id="copy">Copy</button>
+    </div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+
+      function base64Encode(buf) {
+        const bytes = new Uint8Array(buf);
+        let s = "";
+        for (const b of bytes) s += String.fromCharCode(b);
+        return btoa(s);
+      }
+
+      function base64Decode(s) {
+        const bin = atob(s);
+        const out = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+        return out.buffer;
+      }
+
+      async function postJSON(url, body) {
+        console.log(`> ${url}`, body);
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status} from ${url}`);
+        }
+        let resp = await res.json();
+        console.log(`< ${url}`, resp);
+        return resp;
+      }
+
+      $("copy").addEventListener("click", async () => {
+        await navigator.clipboard.writeText($("blob").textContent);
+      });
+
+      $("enrollForm").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        if (!window.PublicKeyCredential) {
+          window.alert("WebAuthn not supported in this browser.");
+          return;
+        }
+
+        const email = $("email").value.trim();
+        const displayname = $("displayname").value.trim();
+        if (!email) {
+          window.alert("Email is required.");
+          return;
+        }
+        if (!displayname) {
+          window.alert("Name is required.");
+          return;
+        }
+
+        try {
+          $("enroll").disabled = true;
+          const beginPayload = {
+            username: email,
+            displayname,
+          };
+          const options = await postJSON("/attestation/begin", beginPayload);
+          options.challenge = base64Decode(options.challenge);
+          options.user.id = base64Decode(options.user.id);
+          if (Array.isArray(options.excludeCredentials)) {
+            for (const c of options.excludeCredentials) {
+              c.id = base64Decode(c.id);
+            }
+          }
+
+          const createParams = {
+            publicKey: options,
+          };
+          const cred = await navigator.credentials.create(createParams);
+          if (!cred) {
+            throw new Error("navigator.credentials.create() returned null");
+          }
+
+          const finishPayload = {
+            attestationObject: base64Encode(cred.response.attestationObject),
+            clientDataJSON: base64Encode(cred.response.clientDataJSON),
+          };
+          const blob = await postJSON("/attestation/finish", finishPayload);
+
+          $("result").removeAttribute("hidden");
+          $("blob").textContent = JSON.stringify(blob, null, 2);
+        } catch (e) {
+          const msg = String(e && e.message ? e.message : e);
+          window.alert(msg);
+        } finally {
+          $("enroll").disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>

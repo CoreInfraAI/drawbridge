@@ -1,0 +1,21 @@
+# github.com/go-passkeys/go-passkeys v0.4.2-0.20251212170742-2852eb57c748 => github.com/flyingmutant/go-passkeys v0.0.0-20260109202745-7585cf57fe48
+## explicit; go 1.22
+github.com/go-passkeys/go-passkeys/webauthn
+github.com/go-passkeys/go-passkeys/webauthn/internal/cbor
+# golang.org/x/crypto v0.46.0
+## explicit; go 1.24.0
+golang.org/x/crypto/acme
+golang.org/x/crypto/acme/autocert
+# golang.org/x/net v0.48.0
+## explicit; go 1.24.0
+golang.org/x/net/idna
+# golang.org/x/text v0.32.0
+## explicit; go 1.24.0
+golang.org/x/text/secure/bidirule
+golang.org/x/text/transform
+golang.org/x/text/unicode/bidi
+golang.org/x/text/unicode/norm
+# pgregory.net/rapid v1.2.0
+## explicit; go 1.18
+pgregory.net/rapid
+# github.com/go-passkeys/go-passkeys => github.com/flyingmutant/go-passkeys v0.0.0-20260109202745-7585cf57fe48

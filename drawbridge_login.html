@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Drawbridge Login</title>
+  </head>
+  <body>
+    <h1>Drawbridge Login</h1>
+    <p>Sign in to access internal services.</p>
+    <p>
+      <button id="login">Sign in</button>
+    </p>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+
+      function base64Encode(buf) {
+        const bytes = new Uint8Array(buf);
+        let s = "";
+        for (const b of bytes) s += String.fromCharCode(b);
+        return btoa(s);
+      }
+
+      function base64Decode(s) {
+        const bin = atob(s);
+        const out = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+        return out.buffer;
+      }
+
+      async function postJSON(url, body) {
+        console.log(`> ${url}`, body);
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status} from ${url}`);
+        }
+        let resp = await res.json();
+        console.log(`< ${url}`, resp);
+        return resp;
+      }
+
+      function getNextParam() {
+        const u = new URL(window.location.href);
+        const next = u.searchParams.get("next");
+        return next ? String(next) : "";
+      }
+
+      $("login").addEventListener("click", async () => {
+        if (!window.PublicKeyCredential) {
+          window.alert("WebAuthn not supported in this browser.");
+          return;
+        }
+
+        try {
+          $("login").disabled = true;
+
+          const options = await postJSON("/assertion/begin", {});
+          options.challenge = base64Decode(options.challenge);
+
+          if (Array.isArray(options.allowCredentials)) {
+            for (const c of options.allowCredentials) {
+              c.id = base64Decode(c.id);
+            }
+          }
+
+          const getParams = { publicKey: options };
+          const cred = await navigator.credentials.get(getParams);
+          if (!cred) {
+            throw new Error("navigator.credentials.get() returned null");
+          }
+
+          const finishPayload = {
+            credentialId: base64Encode(cred.rawId),
+            authenticatorData: base64Encode(cred.response.authenticatorData),
+            clientDataJSON: base64Encode(cred.response.clientDataJSON),
+            signature: base64Encode(cred.response.signature),
+            next: getNextParam(),
+          };
+          const resp = await postJSON("/assertion/finish", finishPayload);
+          const redirectTo = resp.redirect_to ? String(resp.redirect_to) : "";
+          if (redirectTo) {
+            window.location = redirectTo;
+          } else {
+            window.location = "/";
+          }
+        } catch (e) {
+          const msg = String(e && e.message ? e.message : e);
+          window.alert(msg);
+        } finally {
+          $("login").disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>

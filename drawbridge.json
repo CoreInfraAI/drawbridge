@@ -1,0 +1,23 @@
+{
+  "$schema": "./drawbridge.schema.json",
+  "key_file": "skey",
+  "credentials_dir": "creds",
+  "tls_cert_file": "cert.pem",
+  "tls_key_file": "key.pem",
+  "domain_root": "example.com",
+  "domain_drawbridge": "drawbridge.example.com",
+  "domains": {
+    "example.com": {
+      "proxy_to_url": "http://[::]:8080/",
+      "allowed_users": ["alice@example.com"]
+    },
+    "src.example.com": {
+      "proxy_to_url": "http://[::]:8081/",
+      "allowed_users": ["bob@example.com"]
+    },
+    "msg.example.com": {
+      "proxy_to_url": "http://[::]:8082/",
+      "allowed_users": ["carol@example.com"]
+    }
+  }
+}
