@@ -12,7 +12,7 @@ Drawbridge enforces, for all exposed services:
 Drawbridge is intentionally conservative and minimalistic in all aspects – its main design
 goal is to ensure the above guarantees *while having smallest possible total audit surface*.
 You are expected to be able to manually vet all Drawbridge dependencies and manually review
-all Drawbridge source code.
+all Drawbridge source code – [`drawbridge.go`](./drawbridge.go).
 
 To align with this goal, Drawbridge relies on manual user registration and does not provide
 any authorization besides service/subdomain access checks. Drawbridge is designed
