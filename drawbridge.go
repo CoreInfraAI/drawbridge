@@ -492,8 +492,9 @@ func (h *handler) handleAttestationBegin(log *slog.Logger, w http.ResponseWriter
 			{"type": "public-key", "alg": int(webauthn.RS384)},
 			{"type": "public-key", "alg": int(webauthn.RS512)},
 		},
-		"challenge": challenge,
-		"timeout":   cookieTTLChallenge / time.Millisecond,
+		"excludeCredentials": h.excludeCredentialsForUsername(strings.ToLower(req.Username)),
+		"challenge":          challenge,
+		"timeout":            cookieTTLChallenge / time.Millisecond,
 	}
 	cookieData := &challengeCookieData{
 		Type:        "attestation",
@@ -733,6 +734,20 @@ func (h *handler) hasCredentialsForUsername(username string) bool {
 	defer h.credentialsMu.RUnlock()
 
 	return len(h.credentials[username]) > 0
+}
+
+func (h *handler) excludeCredentialsForUsername(username string) []map[string]any {
+	h.credentialsMu.RLock()
+	defer h.credentialsMu.RUnlock()
+
+	exclude := []map[string]any{}
+	for _, cred := range h.credentials[username] {
+		exclude = append(exclude, map[string]any{
+			"type": "public-key",
+			"id":   cred.CredentialID,
+		})
+	}
+	return exclude
 }
 
 func (h *handler) lookupCredential(credentialID []byte) *credentialRecord {
