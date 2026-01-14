@@ -462,7 +462,7 @@ func (h *handler) handleAttestationBegin(log *slog.Logger, w http.ResponseWriter
 	if !readSmallJSON(w, r, &req) {
 		return
 	}
-	log.Info("attestation begin", "username", req.Username, "displayname", req.DisplayName)
+	log.Info("attestation begin", "username", req.Username, "display_name", req.DisplayName)
 	// https://developer.mozilla.org/en-US/docs/Web/API/PublicKeyCredentialCreationOptions
 	challenge := h.randomBlob()
 	userID := userIDFromUsername(req.Username)
@@ -562,7 +562,7 @@ func (h *handler) handleAttestationFinish(log *slog.Logger, w http.ResponseWrite
 		return
 	}
 	if !att.Flags.UserVerified() {
-		log.Warn("attestation user not verified")
+		log.Warn("attestation user not verified", "flags", att.Flags.String())
 		httpError(w, http.StatusUnauthorized)
 		return
 	}
