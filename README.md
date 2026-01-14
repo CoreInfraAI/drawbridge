@@ -85,7 +85,8 @@ You need:
 - a dedicated Drawbridge host under that root (`drawbridge.example.com`)
 - one or more app hosts under that root (`src.example.com`, `msg.example.com`, ...)
 
-Point all of those DNS names to the Drawbridge server IP. Drawbridge routes purely on `Host`.
+Point all of those DNS names to the Drawbridge server IP (you can use a wildcard DNS record).
+Drawbridge routes purely on `Host`.
 
 ### 3) Generate the Drawbridge secret key
 
