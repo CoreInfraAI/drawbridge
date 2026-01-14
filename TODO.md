@@ -10,3 +10,8 @@
 - fork/vendor `go-passkeys` or ensure all PRs have landed
 - migrate to `encoding/json/v2` once it is out (additionally, ensure no unknown fields + no trailing data)
 - custom ACME server support
+
+## Known issues
+
+- Chrome tries to load `/manifest.json` in the background without sending the cookies,
+  which does not work (results in a redirect to login page). Seems like a Chrome issue.
