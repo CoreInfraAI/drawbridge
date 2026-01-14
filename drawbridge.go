@@ -42,6 +42,7 @@ const (
 
 	httpsAddr                = "0.0.0.0:443"
 	httpReadHeaderTimeout    = 5 * time.Second
+	httpIdleTimeout          = 1 * time.Minute
 	httpInternalReadTimeout  = 1 * time.Second
 	httpInternalWriteTimeout = 5 * time.Second
 	httpMaxHeaderBytes       = copyBufSize // Conservative, to limit DoS potential somewhat.
@@ -951,6 +952,7 @@ func runProxy(log *slog.Logger, configPath string) error {
 	srv := &http.Server{
 		Handler:                      h,
 		ReadHeaderTimeout:            httpReadHeaderTimeout,
+		IdleTimeout:                  httpIdleTimeout,
 		MaxHeaderBytes:               httpMaxHeaderBytes,
 		DisableGeneralOptionsHandler: true,
 	}
