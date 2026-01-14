@@ -128,8 +128,12 @@ Use [`drawbridge.service`](./drawbridge.service) to run Drawbridge in production
 ./drawbridge -enroll -config drawbridge.json < enrollment.json
 ```
 
-This writes a new credential record into `credentials_dir`. Send `SIGHUP` to the running
-Drawbridge process to reload credentials without restarting. (Config changes require a restart.)
+`-enroll` only performs basic validation of the credential record JSON and writes it into
+`credentials_dir` under a stable, filesystem-safe name (`<lower(username)>-<base64url(credential_id)>.json`).
+You can skip `-enroll` and place a `*.json` credential record file into `credentials_dir` yourself.
+
+Send `SIGHUP` to the running Drawbridge process to reload credentials without restarting. (Config
+changes require a restart.)
 
 ### 7) Sign in and use proxied apps
 
