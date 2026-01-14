@@ -10,6 +10,7 @@
 - fork/vendor `go-passkeys` or ensure all PRs have landed
 - migrate to `encoding/json/v2` once it is out (additionally, ensure no unknown fields + no trailing data)
 - custom ACME server support
+- consider serving a list of user-accessible services & Drawbridge pages on `https://<domain_drawbridge>/`
 
 ## Known issues
 
