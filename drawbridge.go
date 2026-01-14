@@ -304,6 +304,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rw := &responseWriter{w: w}
 	log := h.log.With(
 		"request_id", id,
+		"remote_addr", r.RemoteAddr,
 		"method", r.Method,
 		"host", host,
 		"path", r.URL.Path,
