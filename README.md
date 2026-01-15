@@ -140,6 +140,12 @@ changes require a restart.)
 Visit any configured app domain (`https://src.example.com/`); Drawbridge will redirect
 unauthenticated safe requests to the login page (`https://<domain_drawbridge>/login`).
 
+## Known issues
+
+- WebAuthn does not work in some webviews (use a standalone browser instead).
+- Chrome tries to load `/manifest.json` in the background without sending the cookies,
+  which does not work (results in a redirect to login page). Seems like a Chrome issue.
+
 ## Contributing
 
 We welcome feedback – bug reports, issues, proposals – but do not accept non-trivial
