@@ -28,8 +28,6 @@ Drawbridge is not:
 
 Drawbridge is configured via a single JSON file (see [`drawbridge.json`](./drawbridge.json) for a complete example).
 
-### Top-level fields
-
 - `key_file` (string, required): Path to the Drawbridge secret key (as produced by `-keygen`).
 - `credentials_dir` (string, required): Directory containing enrolled credential record files.
 - `tls_cert_file`, `tls_key_file` (string, optional): If both are set, Drawbridge serves TLS using
@@ -38,13 +36,10 @@ Drawbridge is configured via a single JSON file (see [`drawbridge.json`](./drawb
   cookie domain for the session cookie.
 - `domain_drawbridge` (string, required): The Drawbridge UI/authentication hostname. Must be the
   same as or a subdomain of `domain_root`.
-- `domains` (object, required): Map of hostname -> domain config (see below). Each hostname must
+- `domains` (object, required): Map of hostname -> domain config. Each hostname must
   be the same as or a subdomain of `domain_root`.
-
-### Per-domain fields (`domains["host"]`)
-
-- `proxy_to_url` (string, required): Upstream URL to proxy to (must be `http` or `https`).
-- `allowed_users` (array of strings, required): List of allowed user identifiers (typically
+- `domains[hostname].proxy_to_url` (string, required): Upstream URL to proxy to (must be `http` or `https`).
+- `domains[hostname].allowed_users` (array of strings, required): List of allowed user identifiers (typically
   emails) for this host. Matching is case-insensitive.
 
 ## How it works
