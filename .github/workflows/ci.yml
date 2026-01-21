@@ -4,7 +4,6 @@ on:
   pull_request:
   push:
     branches:
-      - main
       - master
     tags:
       - "v*"
@@ -30,10 +29,15 @@ jobs:
 
       - name: Cross-compile binaries
         run: |
+          set -euo pipefail
           mkdir -p dist
-          for GOOS in linux darwin; do
+          for GOOS in linux darwin windows; do
             for GOARCH in amd64 arm64; do
-              bin="dist/drawbridge-${GOOS}-${GOARCH}"
+              ext=""
+              if [ "$GOOS" = "windows" ]; then
+                ext=".exe"
+              fi
+              bin="dist/drawbridge-${GOOS}-${GOARCH}${ext}"
               GOOS=$GOOS GOARCH=$GOARCH CGO_ENABLED=0 go build -o "$bin" .
             done
           done
@@ -56,15 +60,31 @@ jobs:
 
       - name: Build release binaries
         run: |
+          set -euo pipefail
           mkdir -p dist
-          for GOARCH in amd64 arm64; do
-            bin="dist/drawbridge-linux-${GOARCH}"
-            GOOS=linux GOARCH=$GOARCH CGO_ENABLED=0 go build -o "$bin" .
+          for GOOS in linux darwin windows; do
+            for GOARCH in amd64 arm64; do
+              ext=""
+              if [ "$GOOS" = "windows" ]; then
+                ext=".exe"
+              fi
+              bin="dist/drawbridge-${GOOS}-${GOARCH}${ext}"
+              GOOS=$GOOS GOARCH=$GOARCH CGO_ENABLED=0 go build -o "$bin" .
+            done
           done
 
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: ${{ github.ref_name }}
-          tag_name: ${{ github.ref_name }}
-          files: dist/*
+      - name: Create or fetch release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG_NAME" >/dev/null 2>&1 || gh release create "$TAG_NAME" --title "$TAG_NAME" --notes ""
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG_NAME" dist/* --clobber
