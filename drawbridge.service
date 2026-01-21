@@ -21,7 +21,17 @@ MemoryDenyWriteExecute=yes
 ProtectSystem=strict
 PrivateDevices=yes
 PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
 ProtectHome=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
 
 # Autocert (ACME) uses os.UserCacheDir(); on Linux this follows $XDG_CACHE_HOME.
 Environment=XDG_CACHE_HOME=/var/cache/drawbridge
