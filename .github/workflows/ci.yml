@@ -59,7 +59,7 @@ jobs:
           mkdir -p dist
           for GOARCH in amd64 arm64; do
             bin="dist/drawbridge-linux-${GOARCH}"
-            GOOS=$GOOS GOARCH=$GOARCH CGO_ENABLED=0 go build -o "$bin" .
+            GOOS=linux GOARCH=$GOARCH CGO_ENABLED=0 go build -o "$bin" .
           done
 
       - name: Publish release
