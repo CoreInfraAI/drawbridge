@@ -62,6 +62,7 @@ const (
 	contentTypeTextHTML = "text/html"
 	contentTypeJSON     = "application/json"
 	hstsValue           = "max-age=31536000; includeSubDomains"
+	robotsNone          = "noindex, nofollow"
 
 	headerAllow         = "Allow"
 	headerCacheControl  = "Cache-Control"
@@ -71,6 +72,7 @@ const (
 	headerOrigin        = "Origin"
 	headerSetCookie     = "Set-Cookie"
 	headerHSTS          = "Strict-Transport-Security"
+	headerRobots        = "X-Robots-Tag"
 
 	headerRequestID = "X-Drawbridge-Request-ID"
 	headerUser      = "X-Drawbridge-User"
@@ -337,6 +339,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rw.Header().Set(headerHSTS, hstsValue)
 
 	if host == h.cfg.DomainDrawbridge {
+		rw.Header().Set(headerRobots, robotsNone)
+
 		rc := http.NewResponseController(w)
 		_ = rc.SetReadDeadline(time.Now().Add(httpInternalReadTimeout))
 		defer rc.SetReadDeadline(time.Time{})
