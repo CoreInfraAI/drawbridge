@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"html/template"
 	"io"
 	"log/slog"
 	"maps"
@@ -48,6 +49,7 @@ const (
 	httpMaxHeaderBytes       = copyBufSize // Conservative, to limit DoS potential somewhat.
 	httpSmallBodyBytes       = copyBufSize
 
+	pathIndex             = "/"
 	pathEnroll            = "/enroll"
 	pathLogin             = "/login"
 	pathLogout            = "/logout"
@@ -56,11 +58,13 @@ const (
 	pathAssertionBegin    = "/assertion/begin"
 	pathAssertionFinish   = "/assertion/finish"
 
+	cacheNoStore        = "no-store"
 	contentTypeTextHTML = "text/html"
 	contentTypeJSON     = "application/json"
 	hstsValue           = "max-age=31536000; includeSubDomains"
 
 	headerAllow         = "Allow"
+	headerCacheControl  = "Cache-Control"
 	headerContentLength = "Content-Length"
 	headerContentType   = "Content-Type"
 	headerCookie        = "Cookie"
@@ -86,13 +90,21 @@ var (
 
 	copyBufPool = newFixedBufferPool(copyBufSize)
 
+	//go:embed drawbridge_index.html
+	contentIndex string
 	//go:embed drawbridge_enroll.html
 	contentEnroll []byte
 	//go:embed drawbridge_login.html
 	contentLogin []byte
 	//go:embed drawbridge_logout.html
 	contentLogout []byte
+
+	tmplIndex *template.Template
 )
+
+func init() {
+	tmplIndex = template.Must(template.New("index").Option("missingkey=error").Parse(contentIndex))
+}
 
 type fixedBufferPool struct {
 	size int
@@ -332,6 +344,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer rc.SetWriteDeadline(time.Time{})
 
 		switch r.URL.Path {
+		case pathIndex:
+			if checkMethod(rw, r, http.MethodGet) {
+				h.handleIndex(log, rw, r)
+			}
 		case pathEnroll:
 			if checkMethod(rw, r, http.MethodGet) {
 				httpWrite(log, rw, contentTypeTextHTML, contentEnroll)
@@ -441,6 +457,35 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		BufferPool: copyBufPool,
 	}
 	proxy.ServeHTTP(rw, r)
+}
+
+func (h *handler) handleIndex(log *slog.Logger, w http.ResponseWriter, r *http.Request) {
+	type templateData struct {
+		SignedIn bool
+		Username string
+		Services []string
+	}
+
+	data := templateData{}
+	if session := h.authenticate(log, r); session != nil {
+		data.SignedIn = true
+		data.Username = session.Username
+		for host := range h.cfg.Domains {
+			if h.authorize(session.Username, host) {
+				data.Services = append(data.Services, host)
+			}
+		}
+		slices.Sort(data.Services)
+	}
+
+	var buf bytes.Buffer
+	if err := tmplIndex.Execute(&buf, &data); err != nil {
+		log.Error("failed to execute index template", "err", err)
+		httpError(w, http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set(headerCacheControl, cacheNoStore)
+	httpWrite(log, w, contentTypeTextHTML, buf.Bytes())
 }
 
 func (h *handler) handleLogout(log *slog.Logger, w http.ResponseWriter, r *http.Request) {

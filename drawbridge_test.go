@@ -201,6 +201,71 @@ func TestDrawbridgeLoginServesHTMLAndHSTS(t *testing.T) {
 	}
 }
 
+func TestDrawbridgeIndex(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("unexpected upstream request to %q", r.URL.String())
+	}))
+	t.Cleanup(upstream.Close)
+
+	h, cfg := newTestHandler(t, upstream.URL, map[string][]string{
+		"a.example.com": {"hello@example.com"},
+		"c.example.com": {"other@example.com"},
+	})
+
+	t.Run("signed_out", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "https://"+cfg.DomainDrawbridge+pathIndex, nil)
+		req.Host = cfg.DomainDrawbridge
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		res := rr.Result()
+		t.Cleanup(func() { _ = res.Body.Close() })
+
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("unexpected status: %v", res.Status)
+		}
+		if got := res.Header.Get(headerHSTS); got != hstsValue {
+			t.Fatalf("unexpected HSTS header: %q", got)
+		}
+		body, _ := io.ReadAll(res.Body)
+		if !bytes.Contains(body, []byte("<title>Drawbridge</title>")) {
+			t.Fatalf("unexpected body, missing title marker")
+		}
+		if !bytes.Contains(body, []byte("href=\"/enroll\"")) {
+			t.Fatalf("unexpected body, missing enroll link")
+		}
+		if !bytes.Contains(body, []byte("href=\"/login\"")) {
+			t.Fatalf("unexpected body, missing login link")
+		}
+		if !bytes.Contains(body, []byte("href=\"/logout\"")) {
+			t.Fatalf("unexpected body, missing logout link")
+		}
+	})
+
+	t.Run("signed_in", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "https://"+cfg.DomainDrawbridge+pathIndex, nil)
+		req.Host = cfg.DomainDrawbridge
+		addValidSessionCookie(t, req, cfg, "hello@example.com")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		res := rr.Result()
+		t.Cleanup(func() { _ = res.Body.Close() })
+
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("unexpected status: %v", res.Status)
+		}
+		body, _ := io.ReadAll(res.Body)
+		if !bytes.Contains(body, []byte("hello@example.com")) {
+			t.Fatalf("unexpected body, missing username marker")
+		}
+		if !bytes.Contains(body, []byte("a.example.com")) {
+			t.Fatalf("unexpected body, missing authorized service marker")
+		}
+		if bytes.Contains(body, []byte("c.example.com")) {
+			t.Fatalf("unexpected body, found unauthorized service marker")
+		}
+	})
+}
+
 func TestUnauthenticatedSafeRequestRedirectsToLogin(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatalf("unexpected upstream request to %q", r.URL.String())

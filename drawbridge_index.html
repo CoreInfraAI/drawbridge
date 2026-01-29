@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Drawbridge</title>
+  </head>
+  <body>
+    <h1>Drawbridge</h1>
+    <p>
+      <a href="/enroll">Enroll</a> / <a href="/login">Login</a> /
+      <a href="/logout">Logout</a>
+    </p>
+    {{if .SignedIn}}
+    <p>Signed in as <code>{{.Username}}</code></p>
+    <ul>
+      {{range .Services}}
+      <li><a href="https://{{.}}">{{.}}</a></li>
+      {{end}}
+    </ul>
+    {{end}}
+  </body>
+</html>
