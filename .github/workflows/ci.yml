@@ -73,18 +73,23 @@ jobs:
             done
           done
 
-      - name: Create or fetch release
+      - name: Create immutable release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          gh release view "$TAG_NAME" >/dev/null 2>&1 || gh release create "$TAG_NAME" --title "$TAG_NAME" --notes ""
+          tag="${{ github.ref_name }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            if [ "$(gh release view "$tag" --json isDraft --jq .isDraft)" = "true" ]; then
+              echo "Draft release '$tag' already exists; uploading assets and publishing."
+              gh release upload "$tag" dist/* --clobber
+              gh release edit "$tag" --draft=false
+            else
+              echo "Release '$tag' already exists and is published; skipping."
+            fi
+            exit 0
+          fi
 
-      - name: Upload release assets
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          gh release upload "$TAG_NAME" dist/* --clobber
+          gh release create "$tag" --draft --title "$tag" --notes ""
+          gh release upload "$tag" dist/* --clobber
+          gh release edit "$tag" --draft=false
