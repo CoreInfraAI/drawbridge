@@ -1,3 +1,8 @@
+<p align="center">
+<img src="static/The%20Langlois%20Bridge%20at%20Arles.jpg" alt="The Langlois Bridge at Arles" /><br />
+<em><small>Vincent van Gogh, The Langlois Bridge at Arles, 1888. Wallraf–Richartz Museum.</small></em>
+</p>
+
 # Drawbridge
 
 Drawbridge is a reverse proxy that enables safe, authenticated access to internal HTTP services
