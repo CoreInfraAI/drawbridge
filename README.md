@@ -67,7 +67,7 @@ strips its own headers/cookies in both directions to reduce spoofing/leakage ris
 
 ## Quickstart
 
-### 1) Build
+### 1. Build
 
 Requires Go 1.25+.
 
@@ -75,7 +75,7 @@ Requires Go 1.25+.
 go build -o drawbridge .
 ```
 
-### 2) Pick domains and DNS
+### 2. Pick domains and DNS
 
 You need:
 
@@ -86,7 +86,7 @@ You need:
 Point all of those DNS names to the Drawbridge server IP (you can use a wildcard DNS record).
 Drawbridge routes purely on `Host`.
 
-### 3) Generate the Drawbridge secret key
+### 3. Generate the Drawbridge secret key
 
 Drawbridge uses a single secret key to HMAC-sign its session cookies.
 
@@ -95,7 +95,7 @@ Drawbridge uses a single secret key to HMAC-sign its session cookies.
 chmod 600 skey
 ```
 
-### 4) Write a config file
+### 4. Write a config file
 
 Start from `drawbridge.json` and update:
 
@@ -105,7 +105,7 @@ Start from `drawbridge.json` and update:
 
 Make sure `credentials_dir` exists and is writable by the Drawbridge process.
 
-### 5) Run Drawbridge
+### 5. Run Drawbridge
 
 Drawbridge serves HTTPS on TCP port `443`, so you need privileges/capabilities to bind to 443.
 
@@ -115,7 +115,7 @@ sudo ./drawbridge -config drawbridge.json
 
 Use [`drawbridge.service`](./drawbridge.service) to run Drawbridge in production with systemd.
 
-### 6) Enroll a WebAuthn credential
+### 6. Enroll a WebAuthn credential
 
 1. Visit Drawbridge enroll page (`https://drawbridge.example.com/enroll`)
 2. Follow the browser prompts; the page will produce enrollment JSON
@@ -132,7 +132,7 @@ place a `*.json` credential record file into `credentials_dir` yourself.
 Send `SIGHUP` to the running Drawbridge process to reload credentials without restarting. (Config
 changes require a restart.)
 
-### 7) Sign in and use proxied apps
+### 7. Sign in and use proxied apps
 
 Visit any configured app domain (`https://src.example.com/`); Drawbridge will redirect
 unauthenticated safe requests to the login page (`https://<domain_drawbridge>/login`).
