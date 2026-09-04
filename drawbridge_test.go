@@ -5,7 +5,8 @@ import (
 	"crypto/ed25519"
 	crand "crypto/rand"
 	"crypto/x509"
-	"encoding/json"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
 	"io"
 	"log/slog"
 	"net/http"
@@ -99,12 +100,13 @@ func writeTestCredential(t *testing.T, dir string, username string) {
 	if err != nil {
 		t.Fatalf("failed to create credential file: %v", err)
 	}
-	enc := json.NewEncoder(f)
-	enc.SetIndent("", "  ")
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(&cred); err != nil {
+	if err := json.MarshalWrite(f, &cred, jsontext.WithIndent("  ")); err != nil {
 		f.Close()
 		t.Fatalf("failed to write credential record: %v", err)
+	}
+	if _, err := io.WriteString(f, "\n"); err != nil {
+		f.Close()
+		t.Fatalf("failed to finish credential record: %v", err)
 	}
 	if err := f.Close(); err != nil {
 		t.Fatalf("failed to close credential file: %v", err)

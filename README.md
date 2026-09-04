@@ -69,7 +69,7 @@ strips its own headers/cookies in both directions to reduce spoofing/leakage ris
 
 ### 1. Build
 
-Requires Go 1.25+.
+Requires Go 1.27.1+.
 
 ```sh
 go build -o drawbridge .

@@ -10,7 +10,9 @@ import (
 	"crypto/x509"
 	_ "embed"
 	"encoding/base64"
-	"encoding/json"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
+	"errors"
 	"flag"
 	"fmt"
 	"html/template"
@@ -168,7 +170,7 @@ func configLoad(path string) (*config, error) {
 	}
 
 	var cfg config
-	err = json.Unmarshal(data, &cfg)
+	err = json.Unmarshal(data, &cfg, json.RejectUnknownMembers(true))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse config: %w", err)
 	}
@@ -543,7 +545,7 @@ func (h *handler) handleAttestationBegin(log *slog.Logger, w http.ResponseWriter
 		},
 		"excludeCredentials": h.excludeCredentialsForUsername(strings.ToLower(req.Username)),
 		"challenge":          challenge,
-		"timeout":            cookieTTLChallenge / time.Millisecond,
+		"timeout":            cookieTTLChallenge.Milliseconds(),
 	}
 	cookieData := &challengeCookieData{
 		Type:        "attestation",
@@ -574,10 +576,8 @@ type credentialRecord struct {
 }
 
 func loadCredentialRecord(r io.Reader) (*credentialRecord, error) {
-	dec := json.NewDecoder(r)
-	dec.DisallowUnknownFields()
 	var cred credentialRecord
-	err := dec.Decode(&cred)
+	err := json.UnmarshalRead(r, &cred, json.RejectUnknownMembers(true))
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode credential record: %w", err)
 	}
@@ -662,7 +662,7 @@ func (h *handler) handleAssertionBegin(log *slog.Logger, w http.ResponseWriter) 
 		"userVerification": "required",
 		"hints":            []string{"client-device", "security-key"},
 		"challenge":        challenge,
-		"timeout":          cookieTTLChallenge / time.Millisecond,
+		"timeout":          cookieTTLChallenge.Milliseconds(),
 	}
 	writeJSON(log, w, resp)
 }
@@ -953,12 +953,12 @@ func credEnroll(configPath string) error {
 	}
 	defer f.Close()
 
-	enc := json.NewEncoder(f)
-	enc.SetIndent("", "  ")
-	enc.SetEscapeHTML(false)
-	err = enc.Encode(cred)
+	err = json.MarshalWrite(f, cred, jsontext.WithIndent("  "))
 	if err != nil {
 		return fmt.Errorf("failed to encode credential record to %q: %w", f.Name(), err)
+	}
+	if _, err := io.WriteString(f, "\n"); err != nil {
+		return fmt.Errorf("failed to finish credential record %q: %w", f.Name(), err)
 	}
 
 	name := fmt.Sprintf("%s-%s.json", strings.ToLower(cred.UserName), base64.RawURLEncoding.EncodeToString(cred.CredentialID))
@@ -1076,12 +1076,14 @@ func checkMethod(w http.ResponseWriter, r *http.Request, method string) bool {
 }
 
 func readSmallJSON(w http.ResponseWriter, r *http.Request, v any) bool {
-	rd := io.LimitReader(r.Body, httpSmallBodyBytes)
-	d := json.NewDecoder(rd)
-	d.DisallowUnknownFields()
-	err := d.Decode(v)
+	rd := http.MaxBytesReader(w, r.Body, httpSmallBodyBytes)
+	err := json.UnmarshalRead(rd, v, json.RejectUnknownMembers(true))
 	if err != nil {
-		httpError(w, http.StatusBadRequest)
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			httpError(w, http.StatusRequestEntityTooLarge)
+		} else {
+			httpError(w, http.StatusBadRequest)
+		}
 		return false
 	}
 	return true
