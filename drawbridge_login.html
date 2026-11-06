@@ -15,20 +15,6 @@
     <script>
       const $ = (id) => document.getElementById(id);
 
-      function base64Encode(buf) {
-        const bytes = new Uint8Array(buf);
-        let s = "";
-        for (const b of bytes) s += String.fromCharCode(b);
-        return btoa(s);
-      }
-
-      function base64Decode(s) {
-        const bin = atob(s);
-        const out = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-        return out.buffer;
-      }
-
       async function postJSON(url, body) {
         console.log(`> ${url}`, body);
         const res = await fetch(url, {
@@ -51,8 +37,9 @@
       }
 
       $("login").addEventListener("click", async () => {
-        if (!window.PublicKeyCredential) {
-          window.alert("WebAuthn not supported in this browser.");
+        if (!window.PublicKeyCredential?.parseRequestOptionsFromJSON ||
+            !PublicKeyCredential.prototype.toJSON) {
+          window.alert("Please use an up-to-date browser with passkey support.");
           return;
         }
 
@@ -60,25 +47,18 @@
           $("login").disabled = true;
 
           const options = await postJSON("/assertion/begin", {});
-          options.challenge = base64Decode(options.challenge);
+          options.hints = ["client-device", "security-key"];
 
-          if (Array.isArray(options.allowCredentials)) {
-            for (const c of options.allowCredentials) {
-              c.id = base64Decode(c.id);
-            }
-          }
-
-          const getParams = { publicKey: options };
+          const getParams = {
+            publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(options),
+          };
           const cred = await navigator.credentials.get(getParams);
           if (!cred) {
             throw new Error("navigator.credentials.get() returned null");
           }
 
           const finishPayload = {
-            credentialId: base64Encode(cred.rawId),
-            authenticatorData: base64Encode(cred.response.authenticatorData),
-            clientDataJSON: base64Encode(cred.response.clientDataJSON),
-            signature: base64Encode(cred.response.signature),
+            credential: cred,
             next: getNextParam(),
           };
           const resp = await postJSON("/assertion/finish", finishPayload);

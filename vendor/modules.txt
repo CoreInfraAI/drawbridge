@@ -1,7 +1,15 @@
-# github.com/go-passkeys/go-passkeys v0.4.2-0.20251212170742-2852eb57c748 => github.com/flyingmutant/go-passkeys v0.0.0-20260109202745-7585cf57fe48
-## explicit; go 1.22
-github.com/go-passkeys/go-passkeys/webauthn
-github.com/go-passkeys/go-passkeys/webauthn/internal/cbor
+# filippo.io/mldsa v1.0.0
+## explicit; go 1.25.0
+filippo.io/mldsa
+filippo.io/mldsa/internal/byteorder
+filippo.io/mldsa/internal/constanttime
+filippo.io/mldsa/internal/fips140
+filippo.io/mldsa/internal/fips140/mldsa
+filippo.io/mldsa/mldsacrypto
+# filippo.io/passkey v0.0.0-20261106191433-42274998ab83
+## explicit; go 1.25.0
+filippo.io/passkey
+filippo.io/passkey/internal/ctap2cbor
 # golang.org/x/crypto v0.58.0
 ## explicit; go 1.26.0
 golang.org/x/crypto/acme
@@ -18,4 +26,3 @@ golang.org/x/text/unicode/norm
 # pgregory.net/rapid v1.3.0
 ## explicit; go 1.23
 pgregory.net/rapid
-# github.com/go-passkeys/go-passkeys => github.com/flyingmutant/go-passkeys v0.0.0-20260109202745-7585cf57fe48

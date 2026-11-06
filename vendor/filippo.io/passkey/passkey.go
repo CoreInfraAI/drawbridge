@@ -1,0 +1,284 @@
+// Package passkey implements the server (Relying Party) side of WebAuthn
+// for discoverable credentials (passkeys).
+//
+// Although WebAuthn supports a range of purposes and policies, this package
+// is designed for password-less authentication with discoverable credentials:
+// i.e. logging into an account with a passkey.
+//
+// The package is built around [passkey records]: opaque strings, handled
+// like prefixed password hashes, that encode everything the server needs
+// to store about a credential.
+//
+//	$webauthn$v=1$transports=hybrid+internal$<base64 authenticator data>
+//
+// Records are immutable: they are produced by [RelyingParty.Register] and never
+// change afterwards. Mutable authenticator state (like backup state) is not
+// tracked; the backup state is reported per login by [RelyingParty.Login] as
+// [LoginResult.BackedUp].
+//
+// # Storage model
+//
+// Applications are expected to store passkey records in a table keyed
+// only by user ID, for example
+//
+//	CREATE TABLE passkeys (
+//	    user_id TEXT NOT NULL,
+//	    record  TEXT NOT NULL,
+//	    FOREIGN KEY(user_id) REFERENCES users(passkeys_user_id)
+//	);
+//	CREATE INDEX passkeys_user_id ON passkeys(user_id);
+//
+// with no index on credential IDs and no uniqueness constraints. No
+// other columns are needed by this package; applications may add their
+// own (e.g. a nickname, creation time, or last-used time for a
+// passkey management UI). Lookups always resolve the user first (from the
+// session during registration, from [Response.UnauthenticatedUserID] or the
+// session during login) and then pass all of the user's records to
+// [RelyingParty.Login], which selects the right one.
+//
+// (Because credentials are never resolved by credential ID across
+// accounts, a credential ID registered maliciously into one account can
+// never affect authentication for another, and the cross-account
+// uniqueness check recommended by the WebAuthn specification becomes
+// unnecessary.)
+//
+// # User IDs
+//
+// User IDs are opaque strings, at most 64 bytes. They
+// are stored inside the authenticator and returned in every login, so
+// they MUST NOT contain personal information such as usernames or email
+// addresses, and they cannot be changed later. Generate them with
+// [crypto/rand.Text] at account creation and map them to accounts in the
+// database. Do not reuse internal account identifiers.
+//
+// For example
+//
+//	ALTER TABLE users ADD COLUMN passkeys_user_id TEXT;
+//	CREATE UNIQUE INDEX users_passkeys_user_id ON users(passkeys_user_id);
+//
+// # Challenges
+//
+// [RelyingParty.NewLogin] returns an opaque request value that must be
+// presented back to [RelyingParty.Login].
+//
+// The application must store the request (e.g. in memory or in a KV store,
+// keyed by [RequestID]) and, if possible, delete it after use, so that each
+// request is accepted at most once.
+//
+// Requests expire [Options.Timeout] after creation (which [RequestCreation]
+// returns), and the application can use the same window as the lifetime of
+// stored requests (e.g. as the KV TTL).
+//
+// Request values don't need to be kept secret but must be protected
+// from tampering.
+//
+// Client-side storage, such as with cookies, weakens the anti-replay
+// protections. This might be acceptable in some threat models, for example
+// if there is complete trust in the TLS connection and the client environment.
+// However, applications must nonetheless authenticate the request value
+// (e.g. with an authenticated cookie) to ensure it has not been tampered with.
+//
+// (Registration has no request value: with attestation "none", no part of a
+// registration response is signed by a party the server trusts, so a
+// registration challenge can't prove freshness and is not verified.
+// Applications tie a registration to the signed-in session, and must protect
+// the registration endpoint with their usual session and cross-site request
+// forgery defenses, like any other authenticated endpoint.)
+//
+// # WebAuthn interface details
+//
+// Registration options request a discoverable credential
+// (residentKey: "required") with user verification "required" (or
+// "preferred" with [RegistrationOptions.Conditional]), attestation "none",
+// and the credProps extension.
+//
+// The requested algorithms are, in order of preference, ML-DSA-44, ES256, and RS256.
+//
+// The user name is also sent as the displayName, which credential providers
+// ignore in practice.
+//
+// Register fails if the response reports (via the credProps extension)
+// that the created credential is not discoverable. Absence of the
+// extension output is accepted: some clients (notably Safari) never
+// report it, and enforcement of discoverability rests on the client's
+// residentKey: "required" obligation.
+//
+// Register does not require the user presence flag, so that conditional
+// (automatic) passkey creation flows, in which the user does not
+// interact with a prompt, are supported.
+//
+// Register verifies that the client data is well-formed JSON with type
+// "webauthn.create", the expected origin, and crossOrigin absent or false;
+// that the authenticator data carries the hash of the RP ID; and that user
+// verification was performed, unless the credential was created conditionally
+// (see the User verification section below). The challenge is not verified;
+// see the Challenges section above.
+//
+// Login options request user verification "required". [RelyingParty.NewLogin]
+// sends an empty allowCredentials list, unless [LoginOptions.AllowCredentials]
+// populates it with the user's credentials.
+//
+// Credential descriptors, in excludeCredentials at registration and in
+// allowCredentials at login, carry the transports recorded at registration,
+// which help the client reach the right authenticator.
+//
+// Both registration and login options carry [Options.Timeout] as the
+// ceremony timeout hint.
+//
+// Login verifies that the signature is valid, with the matched record's
+// public key, over the authenticator data and the hash of the client
+// data; that the client data is well-formed JSON with type
+// "webauthn.get", the request's challenge, the expected origin, and
+// crossOrigin absent or false; that the authenticator data carries the
+// hash of the RP ID (as does the matched record) and has the user
+// presence flag set; that the request has not expired; and that user
+// verification was performed and can be relied upon (see the User
+// verification section below).
+//
+// The signature counter is not checked (it is zero for the major
+// passkey providers).
+//
+// # User verification
+//
+// Password-less login requires user verification (e.g. PIN or biometrics).
+//
+// The UV flag of an assertion is relied upon only if the matched record has the
+// UV flag or lacks the UP flag, i.e. if user verification was performed at
+// registration or the credential was created conditionally. Otherwise, it
+// suggests the credential was stored on an external authenticator without UV
+// set up, and an attacker could have stolen it and set up their own PIN to
+// enable UV. Login fails for such a record.
+//
+// Register also fails if the response has the UP flag but not the UV
+// flag, as the credential could never be used to log in. A record with the UP
+// flag but not the UV flag can therefore only be imported.
+//
+// Registration options request user verification "required", except for
+// conditional (automatic) passkey creation. Conditional creation is not offered
+// for security keys, and non-conditional creation always has the UP flag set.
+//
+// [passkey records]: https://c2sp.org/passkey-record
+package passkey
+
+import (
+	"errors"
+	"math"
+	"net"
+	"strings"
+	"time"
+)
+
+// Options configures a [RelyingParty].
+//
+// The zero value is a valid, common configuration.
+type Options struct {
+	// Timeout is how long a request returned by NewLogin remains valid. It
+	// is also sent to the client as the ceremony timeout hint.
+	//
+	// If zero, it defaults to 24 hours. Clients abort a ceremony when the
+	// hint elapses and conditional UI (autofill) prompts can sit idle for
+	// a long time before the user engages with them.
+	Timeout time.Duration
+}
+
+// A RelyingParty verifies registrations and logins. It holds no state about
+// registered passkeys or ongoing login ceremonies.
+//
+// Its methods are safe for concurrent use by multiple goroutines.
+type RelyingParty struct {
+	rpID    string
+	origin  string
+	timeout time.Duration
+}
+
+// NewRelyingParty returns a RelyingParty for the given RP ID and origin,
+// configured with the given options.
+//
+// rpID is the Relying Party ID. The RP ID scopes which credentials exist for
+// an origin, it is stored in every credential, and it can never change.
+//
+// Generally, the registrable domain of the site (e.g. example.com) is a good
+// RP ID.
+//
+// origin is the origin from which registrations and logins are expected and
+// allowed. It can change over time or across endpoints.
+//
+// It must match exactly the origin of the page that calls
+// navigator.credentials.create() or navigator.credentials.get(), or the
+// platform-specific equivalent.
+//
+// Examples of valid origins are "https://example.com" and
+// "https://accounts.example.com:8443" and "android:apk-key-hash:...".
+//
+// The origin may be outside the RP ID's domain, if authorized through Related
+// Origin Requests (the /.well-known/webauthn document, which the application
+// is responsible for serving).
+//
+// To accept ceremonies from multiple origins, create a RelyingParty per
+// origin, and select it based on the endpoint handling the request.
+func NewRelyingParty(rpID, origin string, opts Options) (*RelyingParty, error) {
+	if rpID == "" {
+		return nil, errors.New("passkey: RP ID is empty")
+	}
+	if len(rpID) > 255 {
+		return nil, errors.New("passkey: RP ID is too long")
+	}
+	for label := range strings.SplitSeq(rpID, ".") {
+		if label == "" {
+			return nil, errors.New("passkey: invalid RP ID")
+		}
+		for _, c := range label {
+			switch {
+			case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-':
+			default:
+				return nil, errors.New("passkey: invalid RP ID; " +
+					"it must be a bare domain")
+			}
+		}
+	}
+	if net.ParseIP(rpID) != nil {
+		return nil, errors.New("passkey: invalid RP ID; " +
+			"it must be a domain, not an IP address")
+	}
+
+	if origin == "" {
+		return nil, errors.New("passkey: Origin is empty")
+	}
+	if !strings.ContainsRune(origin, ':') {
+		return nil, errors.New("passkey: invalid Origin; it must include an origin")
+	}
+	if strings.ContainsRune(origin, '*') {
+		return nil, errors.New(`passkey: Origin contains "*": wildcard origins are not supported`)
+	}
+	if scheme, rest, ok := strings.Cut(origin, "://"); ok {
+		if scheme == "" || rest == "" {
+			return nil, errors.New("passkey: invalid Origin; " +
+				"it must be canonical, without path")
+		}
+		for _, c := range scheme + rest {
+			switch {
+			case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-', c == '.', c == ':':
+			default:
+				return nil, errors.New("passkey: invalid Origin; " +
+					"it must be canonical, without path")
+			}
+		}
+	}
+
+	timeout := opts.Timeout
+	switch {
+	case timeout < 0:
+		return nil, errors.New("passkey: Timeout is negative")
+	case timeout.Milliseconds() > math.MaxUint32:
+		// Clients coerce the timeout hint to a WebIDL unsigned long.
+		return nil, errors.New("passkey: Timeout is too large")
+	case timeout == 0:
+		timeout = 24 * time.Hour
+	}
+
+	return &RelyingParty{
+		rpID:    rpID,
+		origin:  origin,
+		timeout: timeout,
+	}, nil
+}

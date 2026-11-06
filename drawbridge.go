@@ -3,11 +3,9 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"crypto"
 	"crypto/hmac"
 	crand "crypto/rand"
 	"crypto/sha256"
-	"crypto/x509"
 	_ "embed"
 	"encoding/base64"
 	"encoding/json/jsontext"
@@ -34,7 +32,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/go-passkeys/go-passkeys/webauthn"
+	"filippo.io/passkey"
 	"golang.org/x/crypto/acme/autocert"
 )
 
@@ -233,7 +231,8 @@ type sessionCookieData struct {
 
 type challengeCookieData struct {
 	Type        string `json:"typ"`
-	Challenge   []byte `json:"chal"`
+	Challenge   string `json:"chal,omitempty"`
+	Request     []byte `json:"req,omitempty"`
 	UserID      []byte `json:"uid,omitempty"`
 	Username    string `json:"name,omitempty"`
 	DisplayName string `json:"disp,omitempty"`
@@ -287,6 +286,7 @@ func cookieDecode[T any](name string, cookie string, key [keySize]byte) (*T, err
 type handler struct {
 	log *slog.Logger
 	cfg *config
+	rp  *passkey.RelyingParty
 
 	rngMu sync.Mutex
 	rng   *rand.ChaCha8
@@ -295,18 +295,25 @@ type handler struct {
 	credentials   map[string][]*credentialRecord
 }
 
-func newHandler(log *slog.Logger, cfg *config) *handler {
+func newHandler(log *slog.Logger, cfg *config) (*handler, error) {
+	rp, err := passkey.NewRelyingParty(cfg.DomainDrawbridge, "https://"+cfg.DomainDrawbridge,
+		passkey.Options{Timeout: cookieTTLChallenge})
+	if err != nil {
+		return nil, fmt.Errorf("failed to configure passkeys: %w", err)
+	}
+
 	var seed [32]byte
 	crand.Read(seed[:])
 
 	h := &handler{
 		log: log,
 		cfg: cfg,
+		rp:  rp,
 		rng: rand.NewChaCha8(seed),
 	}
 	h.reloadCredentials()
 
-	return h
+	return h, nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -516,40 +523,26 @@ func (h *handler) handleAttestationBegin(log *slog.Logger, w http.ResponseWriter
 		return
 	}
 	log.Info("attestation begin", "username", req.Username, "display_name", req.DisplayName)
-	// https://developer.mozilla.org/en-US/docs/Web/API/PublicKeyCredentialCreationOptions
-	challenge := h.randomBlob()
 	userID := userIDFromUsername(req.Username)
-	resp := map[string]any{
-		"rp": map[string]any{
-			"id":   h.cfg.DomainDrawbridge,
-			"name": "Drawbridge",
-		},
-		"user": map[string]any{
-			"id":          userID,
-			"name":        req.Username,
-			"displayName": req.DisplayName,
-		},
-		"authenticatorSelection": map[string]any{
-			"residentKey":      "required",
-			"userVerification": "required",
-		},
-		"hints": []string{"client-device", "security-key"},
-		"pubKeyCredParams": []map[string]any{
-			{"type": "public-key", "alg": int(webauthn.EdDSA)},
-			{"type": "public-key", "alg": int(webauthn.ES256)},
-			{"type": "public-key", "alg": int(webauthn.ES384)},
-			{"type": "public-key", "alg": int(webauthn.ES512)},
-			{"type": "public-key", "alg": int(webauthn.RS256)},
-			{"type": "public-key", "alg": int(webauthn.RS384)},
-			{"type": "public-key", "alg": int(webauthn.RS512)},
-		},
-		"excludeCredentials": h.excludeCredentialsForUsername(strings.ToLower(req.Username)),
-		"challenge":          challenge,
-		"timeout":            cookieTTLChallenge.Milliseconds(),
+	options, err := h.rp.NewRegistration(
+		passkey.User{ID: string(userID), Name: req.Username},
+		passkey.RegistrationOptions{ExcludeCredentials: h.passkeysForUsername(strings.ToLower(req.Username))})
+	if err != nil {
+		log.Warn("invalid registration options", "err", err)
+		httpError(w, http.StatusBadRequest)
+		return
+	}
+	var creation struct {
+		Challenge string `json:"challenge"`
+	}
+	if err := json.Unmarshal(options, &creation); err != nil || creation.Challenge == "" {
+		log.Error("invalid registration challenge", "err", err)
+		httpError(w, http.StatusInternalServerError)
+		return
 	}
 	cookieData := &challengeCookieData{
 		Type:        "attestation",
-		Challenge:   challenge,
+		Challenge:   creation.Challenge,
 		UserID:      userID,
 		Username:    req.Username,
 		DisplayName: req.DisplayName,
@@ -560,19 +553,17 @@ func (h *handler) handleAttestationBegin(log *slog.Logger, w http.ResponseWriter
 	if !httpHeaderSetCookieValue(log, w, cookieNameChallenge, cookieData, h.cfg.DomainDrawbridge, cookieTTLChallenge, h.cfg.key, http.SameSiteStrictMode) {
 		return
 	}
-	writeJSON(log, w, resp)
+	w.Header().Set(headerCacheControl, cacheNoStore)
+	httpWrite(log, w, contentTypeJSON, options)
 }
 
 type credentialRecord struct {
-	CredentialID      []byte `json:"credential_id"`
 	UserID            []byte `json:"user_id"`
 	UserName          string `json:"user_name"`
 	UserDisplayName   string `json:"user_display_name"`
 	AuthenticatorID   string `json:"authenticator_id"`
 	AuthenticatorName string `json:"authenticator_name,omitempty"`
-	PublicKey         []byte `json:"public_key"`
-	Algorithm         int    `json:"algorithm"`
-	publicKey         crypto.PublicKey
+	Passkey           string `json:"passkey"`
 }
 
 func loadCredentialRecord(r io.Reader) (*credentialRecord, error) {
@@ -581,59 +572,74 @@ func loadCredentialRecord(r io.Reader) (*credentialRecord, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode credential record: %w", err)
 	}
-	cred.publicKey, err = x509.ParsePKIXPublicKey(cred.PublicKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse credential public key: %w", err)
+	if cred.UserName == "" || len(cred.UserID) == 0 || len(cred.UserID) > 64 {
+		return nil, fmt.Errorf("invalid credential user")
 	}
+	cred.AuthenticatorID, err = passkeyAuthenticatorID(cred.Passkey)
+	if err != nil {
+		return nil, err
+	}
+	cred.AuthenticatorName = authenticatorNames[cred.AuthenticatorID]
 	return &cred, nil
 }
 
-func (h *handler) handleAttestationFinish(log *slog.Logger, w http.ResponseWriter, r *http.Request) {
-	type attestationFinishRequest struct {
-		AttestationObject []byte `json:"attestationObject"`
-		ClientDataJSON    []byte `json:"clientDataJSON"`
+func passkeyAuthenticatorID(record string) (string, error) {
+	aaguid, err := passkey.AAGUID(record)
+	if err != nil {
+		return "", fmt.Errorf("invalid passkey record: %w", err)
 	}
+	return fmt.Sprintf("%x-%x-%x-%x-%x", aaguid[:4], aaguid[4:6], aaguid[6:8], aaguid[8:10], aaguid[10:]), nil
+}
 
-	var req attestationFinishRequest
-	if !readSmallJSON(w, r, &req) {
+func (h *handler) handleAttestationFinish(log *slog.Logger, w http.ResponseWriter, r *http.Request) {
+	var response jsontext.Value
+	if !readSmallJSON(w, r, &response) {
 		return
 	}
 	challenge := httpCookieValidateChallenge(log, w, r, "attestation", h.cfg.DomainDrawbridge, h.cfg.key)
 	if challenge == nil {
 		return
 	}
-	rp := &webauthn.RelyingParty{
-		ID:     h.cfg.DomainDrawbridge,
-		Origin: "https://" + h.cfg.DomainDrawbridge,
+	var registration struct {
+		Response struct {
+			ClientDataJSON string `json:"clientDataJSON"`
+		} `json:"response"`
 	}
-	att, err := rp.VerifyAttestation(
-		challenge.Challenge, req.ClientDataJSON, req.AttestationObject)
+	// Match the library's case-insensitive field lookup (until it switches to encoding/json/v2).
+	if err := json.Unmarshal(response, &registration, json.MatchCaseInsensitiveNames(true)); err != nil {
+		log.Warn("invalid registration response", "err", err)
+		httpError(w, http.StatusUnauthorized)
+		return
+	}
+	clientDataJSON, err := base64.RawURLEncoding.Strict().DecodeString(registration.Response.ClientDataJSON)
+	var clientData struct {
+		Challenge string `json:"challenge"`
+	}
+	if err != nil || json.Unmarshal(clientDataJSON, &clientData, json.MatchCaseInsensitiveNames(true)) != nil ||
+		challenge.Challenge == "" || clientData.Challenge != challenge.Challenge {
+		log.Warn("attestation challenge mismatch")
+		httpError(w, http.StatusUnauthorized)
+		return
+	}
+	record, err := h.rp.Register(response)
 	if err != nil {
 		log.Warn("attestation failed", "err", err)
 		httpError(w, http.StatusUnauthorized)
 		return
 	}
-	if !att.Flags.UserVerified() {
-		log.Warn("attestation user not verified", "flags", att.Flags.String())
+	authenticatorID, err := passkeyAuthenticatorID(record)
+	if err != nil {
+		log.Warn("attestation failed", "err", err)
 		httpError(w, http.StatusUnauthorized)
 		return
 	}
-	pub, err := x509.MarshalPKIXPublicKey(att.PublicKey)
-	if err != nil {
-		log.Error("failed to marshal public key", "err", err)
-		httpError(w, http.StatusInternalServerError)
-		return
-	}
-	name, _ := att.AAGUID.Name()
 	resp := credentialRecord{
-		CredentialID:      att.CredentialID,
 		UserID:            challenge.UserID,
 		UserName:          challenge.Username,
 		UserDisplayName:   challenge.DisplayName,
-		AuthenticatorID:   att.AAGUID.String(),
-		AuthenticatorName: name,
-		PublicKey:         pub,
-		Algorithm:         int(att.Algorithm),
+		AuthenticatorID:   authenticatorID,
+		AuthenticatorName: authenticatorNames[authenticatorID],
+		Passkey:           record,
 	}
 	log.Info("attestation finish",
 		"username", resp.UserName,
@@ -645,35 +651,30 @@ func (h *handler) handleAttestationFinish(log *slog.Logger, w http.ResponseWrite
 }
 
 func (h *handler) handleAssertionBegin(log *slog.Logger, w http.ResponseWriter) {
-	challenge := h.randomBlob()
+	request, options, err := h.rp.NewLogin(passkey.LoginOptions{})
+	if err != nil {
+		log.Error("failed to create login options", "err", err)
+		httpError(w, http.StatusInternalServerError)
+		return
+	}
 	cookieData := &challengeCookieData{
-		Type:      "assertion",
-		Challenge: challenge,
-		Domain:    h.cfg.DomainDrawbridge,
-		Issued:    uint32(time.Now().Unix()),
-		Expires:   uint32(time.Now().Add(cookieTTLChallenge).Unix()),
+		Type:    "assertion",
+		Request: request,
+		Domain:  h.cfg.DomainDrawbridge,
+		Issued:  uint32(time.Now().Unix()),
+		Expires: uint32(time.Now().Add(cookieTTLChallenge).Unix()),
 	}
 	if !httpHeaderSetCookieValue(log, w, cookieNameChallenge, cookieData, h.cfg.DomainDrawbridge, cookieTTLChallenge, h.cfg.key, http.SameSiteStrictMode) {
 		return
 	}
-	// https://developer.mozilla.org/en-US/docs/Web/API/PublicKeyCredentialRequestOptions
-	resp := map[string]any{
-		"rpId":             h.cfg.DomainDrawbridge,
-		"userVerification": "required",
-		"hints":            []string{"client-device", "security-key"},
-		"challenge":        challenge,
-		"timeout":          cookieTTLChallenge.Milliseconds(),
-	}
-	writeJSON(log, w, resp)
+	w.Header().Set(headerCacheControl, cacheNoStore)
+	httpWrite(log, w, contentTypeJSON, options)
 }
 
 func (h *handler) handleAssertionFinish(log *slog.Logger, w http.ResponseWriter, r *http.Request) {
 	type assertionFinishRequest struct {
-		CredentialID      []byte `json:"credentialId"`
-		AuthenticatorData []byte `json:"authenticatorData"`
-		ClientDataJSON    []byte `json:"clientDataJSON"`
-		Signature         []byte `json:"signature"`
-		Next              string `json:"next"`
+		Credential jsontext.Value `json:"credential"`
+		Next       string         `json:"next"`
 	}
 
 	var req assertionFinishRequest
@@ -684,35 +685,31 @@ func (h *handler) handleAssertionFinish(log *slog.Logger, w http.ResponseWriter,
 	if challenge == nil {
 		return
 	}
-	cred := h.lookupCredential(req.CredentialID)
-	if cred == nil {
-		log.Warn("assertion failed: no matching credential")
-		httpError(w, http.StatusUnauthorized)
-		return
-	}
-
-	rp := &webauthn.RelyingParty{
-		ID:     h.cfg.DomainDrawbridge,
-		Origin: "https://" + h.cfg.DomainDrawbridge,
-	}
-	assertion, err := rp.VerifyAssertion(
-		cred.publicKey,
-		webauthn.Algorithm(cred.Algorithm),
-		challenge.Challenge,
-		req.ClientDataJSON,
-		req.AuthenticatorData,
-		req.Signature,
-	)
+	response, err := passkey.ParseResponse(req.Credential)
 	if err != nil {
 		log.Warn("assertion failed", "err", err)
 		httpError(w, http.StatusUnauthorized)
 		return
 	}
-	if !assertion.Flags.UserVerified() {
-		log.Warn("assertion user not verified", "flags", assertion.Flags.String())
+	// The user handle is only a lookup hint until Login verifies the assertion.
+	creds := h.credentialsForUserID(response.UnauthenticatedUserID())
+	if len(creds) == 0 {
+		log.Warn("assertion failed: no matching credential")
 		httpError(w, http.StatusUnauthorized)
 		return
 	}
+
+	passkeys := make([]string, len(creds))
+	for i, cred := range creds {
+		passkeys[i] = cred.Passkey
+	}
+	result, err := h.rp.Login(response, challenge.Request, passkeys)
+	if err != nil {
+		log.Warn("assertion failed", "err", err)
+		httpError(w, http.StatusUnauthorized)
+		return
+	}
+	cred := creds[result.Matched]
 
 	ttl := h.sessionTTL()
 	session := &sessionCookieData{
@@ -785,33 +782,31 @@ func (h *handler) hasCredentialsForUsername(username string) bool {
 	return len(h.credentials[username]) > 0
 }
 
-func (h *handler) excludeCredentialsForUsername(username string) []map[string]any {
+func (h *handler) passkeysForUsername(username string) []string {
 	h.credentialsMu.RLock()
 	defer h.credentialsMu.RUnlock()
 
-	exclude := []map[string]any{}
+	var records []string
 	for _, cred := range h.credentials[username] {
-		exclude = append(exclude, map[string]any{
-			"type": "public-key",
-			"id":   cred.CredentialID,
-		})
+		records = append(records, cred.Passkey)
 	}
-	return exclude
+	return records
 }
 
-func (h *handler) lookupCredential(credentialID []byte) *credentialRecord {
+func (h *handler) credentialsForUserID(userID string) []*credentialRecord {
 	h.credentialsMu.RLock()
 	defer h.credentialsMu.RUnlock()
 
 	// O(N), which is acceptable given the use case.
+	var records []*credentialRecord
 	for _, creds := range h.credentials {
 		for _, cred := range creds {
-			if bytes.Equal(cred.CredentialID, credentialID) {
-				return cred
+			if string(cred.UserID) == userID {
+				records = append(records, cred)
 			}
 		}
 	}
-	return nil
+	return records
 }
 
 func (h *handler) validNextURL(next string) bool {
@@ -844,12 +839,6 @@ func (h *handler) sessionTTL() time.Duration {
 
 	rng := rand.New(h.rng)
 	return cookieTTLSessionMin + time.Duration(rng.Int64N(int64(cookieTTLSessionMax-cookieTTLSessionMin)))
-}
-
-func (h *handler) randomBlob() []byte {
-	var chal [keySize]byte
-	crand.Read(chal[:])
-	return chal[:]
 }
 
 func (h *handler) reloadCredentials() {
@@ -961,7 +950,8 @@ func credEnroll(configPath string) error {
 		return fmt.Errorf("failed to finish credential record %q: %w", f.Name(), err)
 	}
 
-	name := fmt.Sprintf("%s-%s.json", strings.ToLower(cred.UserName), base64.RawURLEncoding.EncodeToString(cred.CredentialID))
+	id := sha256.Sum256([]byte(cred.Passkey))
+	name := fmt.Sprintf("%s-%s.json", strings.ToLower(cred.UserName), base64.RawURLEncoding.EncodeToString(id[:]))
 	filename := filepath.Join(cfg.CredentialsDir, simpleEscapeFilename(name))
 	err = os.Rename(f.Name(), filename)
 	if err != nil {
@@ -990,7 +980,10 @@ func runProxy(log *slog.Logger, configPath string) error {
 		return fmt.Errorf("failed to load config file %q: %w", configPath, err)
 	}
 
-	h := newHandler(log, cfg)
+	h, err := newHandler(log, cfg)
+	if err != nil {
+		return err
+	}
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGHUP)
 	defer signal.Stop(sigs)
