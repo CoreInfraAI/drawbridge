@@ -71,20 +71,6 @@
     <script>
       const $ = (id) => document.getElementById(id);
 
-      function base64Encode(buf) {
-        const bytes = new Uint8Array(buf);
-        let s = "";
-        for (const b of bytes) s += String.fromCharCode(b);
-        return btoa(s);
-      }
-
-      function base64Decode(s) {
-        const bin = atob(s);
-        const out = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-        return out.buffer;
-      }
-
       async function postJSON(url, body) {
         console.log(`> ${url}`, body);
         const res = await fetch(url, {
@@ -106,8 +92,9 @@
 
       $("enrollForm").addEventListener("submit", async (e) => {
         e.preventDefault();
-        if (!window.PublicKeyCredential) {
-          window.alert("WebAuthn not supported in this browser.");
+        if (!window.PublicKeyCredential?.parseCreationOptionsFromJSON ||
+            !PublicKeyCredential.prototype.toJSON) {
+          window.alert("Please use an up-to-date browser with passkey support.");
           return;
         }
 
@@ -129,27 +116,19 @@
             displayname,
           };
           const options = await postJSON("/attestation/begin", beginPayload);
-          options.challenge = base64Decode(options.challenge);
-          options.user.id = base64Decode(options.user.id);
-          if (Array.isArray(options.excludeCredentials)) {
-            for (const c of options.excludeCredentials) {
-              c.id = base64Decode(c.id);
-            }
-          }
+          options.rp.name = "Drawbridge";
+          options.user.displayName = displayname;
+          options.hints = ["client-device", "security-key"];
 
           const createParams = {
-            publicKey: options,
+            publicKey: PublicKeyCredential.parseCreationOptionsFromJSON(options),
           };
           const cred = await navigator.credentials.create(createParams);
           if (!cred) {
             throw new Error("navigator.credentials.create() returned null");
           }
 
-          const finishPayload = {
-            attestationObject: base64Encode(cred.response.attestationObject),
-            clientDataJSON: base64Encode(cred.response.clientDataJSON),
-          };
-          const blob = await postJSON("/attestation/finish", finishPayload);
+          const blob = await postJSON("/attestation/finish", cred);
 
           $("result").removeAttribute("hidden");
           $("blob").textContent = JSON.stringify(blob, null, 2);

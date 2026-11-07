@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
-	"crypto/ed25519"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	crand "crypto/rand"
-	"crypto/x509"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"io"
@@ -19,7 +22,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-passkeys/go-passkeys/webauthn"
 	"pgregory.net/rapid"
 )
 
@@ -76,23 +78,12 @@ func mustParseURL(t *testing.T, s string) *url.URL {
 func writeTestCredential(t *testing.T, dir string, username string) {
 	t.Helper()
 
-	pub, _, err := ed25519.GenerateKey(crand.Reader)
-	if err != nil {
-		t.Fatalf("failed to generate key: %v", err)
-	}
-	pkix, err := x509.MarshalPKIXPublicKey(pub)
-	if err != nil {
-		t.Fatalf("failed to marshal public key: %v", err)
-	}
-
+	a := newTestAuthenticator(t)
 	cred := credentialRecord{
-		CredentialID:    []byte("test-credential-id"),
 		UserID:          userIDFromUsername(username),
 		UserName:        username,
 		UserDisplayName: "Test User",
-		AuthenticatorID: "test-authenticator",
-		PublicKey:       pkix,
-		Algorithm:       int(webauthn.EdDSA),
+		Passkey:         "$webauthn$v=1$" + base64.RawStdEncoding.EncodeToString(a.authData("drawbridge.example.com", 0x05, true)),
 	}
 
 	path := filepath.Join(dir, "cred.json")
@@ -146,7 +137,10 @@ func newTestHandler(t *testing.T, upstreamURL string, allowedUsersByHost map[str
 		}
 	}
 
-	h := newHandler(discardLogger(), cfg)
+	h, err := newHandler(discardLogger(), cfg)
+	if err != nil {
+		t.Fatalf("failed to create handler: %v", err)
+	}
 	return h, cfg
 }
 
@@ -172,6 +166,312 @@ func addValidSessionCookie(t *testing.T, req *http.Request, cfg *config, usernam
 		Name:  cookieNameSession,
 		Value: value,
 	})
+}
+
+// A software authenticator for exercising the HTTP flow with real signatures.
+type testAuthenticator struct {
+	key *ecdsa.PrivateKey
+	id  []byte
+}
+
+func newTestAuthenticator(t *testing.T) *testAuthenticator {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), crand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := make([]byte, 32)
+	crand.Read(id)
+	return &testAuthenticator{key: key, id: id}
+}
+
+func (a *testAuthenticator) authData(rpID string, flags byte, registration bool) []byte {
+	rpHash := sha256.Sum256([]byte(rpID))
+	if registration {
+		flags |= 0x40 // Attested credential data.
+	}
+	b := append(rpHash[:], flags)
+	b = binary.BigEndian.AppendUint32(b, 0)
+	if registration {
+		// Apple Passwords' AAGUID exercises the authenticator display-name table.
+		b = append(b, 0xfb, 0xfc, 0x30, 0x07, 0x15, 0x4e, 0x4e, 0xcc, 0x8c, 0x0b, 0x6e, 0x02, 0x05, 0x57, 0xd7, 0xbd)
+		b = binary.BigEndian.AppendUint16(b, uint16(len(a.id)))
+		b = append(b, a.id...)
+		// Canonical COSE EC2 key: {1: 2, 3: -7, -1: 1, -2: x, -3: y}.
+		b = append(b, 0xa5, 0x01, 0x02, 0x03, 0x26, 0x20, 0x01, 0x21, 0x58, 0x20)
+		b = append(b, a.key.X.FillBytes(make([]byte, 32))...)
+		b = append(b, 0x22, 0x58, 0x20)
+		b = append(b, a.key.Y.FillBytes(make([]byte, 32))...)
+	}
+	return b
+}
+
+func testJSON(t *testing.T, v any) jsontext.Value {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func (a *testAuthenticator) registration(t *testing.T, rpID, challenge string) map[string]any {
+	t.Helper()
+	ad := a.authData(rpID, 0x05, true)
+	cd := testJSON(t, map[string]any{
+		"type": "webauthn.create", "origin": "https://" + rpID, "challenge": challenge,
+	})
+	return map[string]any{
+		"id": base64.RawURLEncoding.EncodeToString(a.id), "rawId": base64.RawURLEncoding.EncodeToString(a.id),
+		"type": "public-key", "authenticatorAttachment": "platform",
+		"clientExtensionResults": map[string]any{"credProps": map[string]any{"rk": true}},
+		"response": map[string]any{
+			"clientDataJSON":    base64.RawURLEncoding.EncodeToString(cd),
+			"authenticatorData": base64.RawURLEncoding.EncodeToString(ad),
+			"transports":        []string{"internal"},
+		},
+	}
+}
+
+func (a *testAuthenticator) assertion(t *testing.T, rpID, origin, challenge string, userID []byte, flags byte) map[string]any {
+	t.Helper()
+	cd := testJSON(t, map[string]any{"type": "webauthn.get", "origin": origin, "challenge": challenge})
+	ad := a.authData(rpID, flags, false)
+	cdHash := sha256.Sum256(cd)
+	digest := sha256.Sum256(append(append([]byte{}, ad...), cdHash[:]...))
+	sig, err := ecdsa.SignASN1(crand.Reader, a.key, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return map[string]any{
+		"id": base64.RawURLEncoding.EncodeToString(a.id), "rawId": base64.RawURLEncoding.EncodeToString(a.id),
+		"type": "public-key", "authenticatorAttachment": "platform", "clientExtensionResults": map[string]any{},
+		"response": map[string]any{
+			"clientDataJSON":    base64.RawURLEncoding.EncodeToString(cd),
+			"authenticatorData": base64.RawURLEncoding.EncodeToString(ad),
+			"signature":         base64.RawURLEncoding.EncodeToString(sig),
+			"userHandle":        base64.RawURLEncoding.EncodeToString(userID),
+		},
+	}
+}
+
+func passkeyPost(t *testing.T, h *handler, path string, body any, cookie *http.Cookie) *httptest.ResponseRecorder {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodPost, "https://"+h.cfg.DomainDrawbridge+path, bytes.NewReader(testJSON(t, body)))
+	r.Header.Set(headerContentType, contentTypeJSON)
+	if cookie != nil {
+		r.AddCookie(cookie)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w
+}
+
+func passkeyBegin(t *testing.T, h *handler, path string, body any) (string, *http.Cookie) {
+	t.Helper()
+	w := passkeyPost(t, h, path, body, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("begin failed: %s", w.Body)
+	}
+	var options struct {
+		Challenge string `json:"challenge"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &options); err != nil {
+		t.Fatal(err)
+	}
+	if options.Challenge == "" || w.Header().Get(headerCacheControl) != cacheNoStore {
+		t.Fatalf("invalid or cacheable options: %s", w.Body)
+	}
+	for _, c := range w.Result().Cookies() {
+		if c.Name == cookieNameChallenge {
+			return options.Challenge, c
+		}
+	}
+	t.Fatal("missing challenge cookie")
+	return "", nil
+}
+
+func TestPasskeyEnrollmentAndLogin(t *testing.T) {
+	h, cfg := newTestHandler(t, "http://127.0.0.1:1", map[string][]string{"example.com": {"alice@example.com"}})
+	a := newTestAuthenticator(t)
+	begin := map[string]any{"username": "Alice@example.com", "displayname": "Alice Carroll"}
+	challenge, cookie := passkeyBegin(t, h, pathAttestationBegin, begin)
+	w := passkeyPost(t, h, pathAttestationFinish, a.registration(t, cfg.DomainDrawbridge, challenge), cookie)
+	if w.Code != http.StatusOK {
+		t.Fatalf("registration failed: %s", w.Body)
+	}
+	cred, err := loadCredentialRecord(bytes.NewReader(w.Body.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cred.UserName != "Alice@example.com" || cred.UserDisplayName != "Alice Carroll" || cred.AuthenticatorName != "Apple Passwords" ||
+		cred.AuthenticatorID != "fbfc3007-154e-4ecc-8c0b-6e020557d7bd" || !bytes.Equal(cred.UserID, userIDFromUsername(cred.UserName)) {
+		t.Fatalf("wrong enrollment metadata: %+v", cred)
+	}
+	for _, c := range w.Result().Cookies() {
+		if c.Name == cookieNameSession {
+			t.Fatal("enrollment granted a session before administrator approval")
+		}
+	}
+	enrollment := bytes.Clone(w.Body.Bytes())
+	login := func() *httptest.ResponseRecorder {
+		challenge, cookie := passkeyBegin(t, h, pathAssertionBegin, map[string]any{})
+		return passkeyPost(t, h, pathAssertionFinish, map[string]any{
+			"credential": a.assertion(t, cfg.DomainDrawbridge, "https://"+cfg.DomainDrawbridge, challenge, cred.UserID, 0x05),
+			"next":       "https://example.com/welcome",
+		}, cookie)
+	}
+	if w := login(); w.Code != http.StatusUnauthorized {
+		t.Fatalf("login succeeded before administrator approval: %d", w.Code)
+	}
+
+	// Exercise the real administrator command against the JSON the employee received.
+	cfg.KeyFile = filepath.Join(t.TempDir(), "key")
+	if err := os.WriteFile(cfg.KeyFile, []byte(keyEncode(cfg.key)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configFile := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configFile, testJSON(t, cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inputFile := filepath.Join(t.TempDir(), "enrollment.json")
+	if err := os.WriteFile(inputFile, enrollment, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	input, err := os.Open(inputFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	stdin := os.Stdin
+	os.Stdin = input
+	defer func() { os.Stdin = stdin }()
+	if err := credEnroll(configFile); err != nil {
+		t.Fatal(err)
+	}
+	h.reloadCredentials()
+
+	w = passkeyPost(t, h, pathAttestationBegin, begin, nil)
+	var options struct {
+		User struct {
+			ID string `json:"id"`
+		} `json:"user"`
+		Exclude []struct {
+			ID string `json:"id"`
+		} `json:"excludeCredentials"`
+		Selection struct {
+			ResidentKey      string `json:"residentKey"`
+			UserVerification string `json:"userVerification"`
+		} `json:"authenticatorSelection"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &options); err != nil {
+		t.Fatal(err)
+	}
+	if options.User.ID != base64.RawURLEncoding.EncodeToString(cred.UserID) ||
+		len(options.Exclude) != 1 || options.Exclude[0].ID != base64.RawURLEncoding.EncodeToString(a.id) ||
+		options.Selection.ResidentKey != "required" || options.Selection.UserVerification != "required" {
+		t.Fatalf("wrong registration options: %s", w.Body)
+	}
+	w = login()
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "https://example.com/welcome") {
+		t.Fatalf("login failed: %d %s", w.Code, w.Body)
+	}
+	var sessionCookie *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == cookieNameSession {
+			sessionCookie = c
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("login did not issue a session cookie")
+	}
+	session, err := cookieDecode[sessionCookieData](cookieNameSession, sessionCookie.Value, cfg.key)
+	if err != nil || session.Username != "alice@example.com" {
+		t.Fatalf("incorrect signed-in user: %+v, %v", session, err)
+	}
+	// Removing the installed record and reloading revokes login and existing sessions.
+	id := sha256.Sum256([]byte(cred.Passkey))
+	filename := "alice@example.com-" + base64.RawURLEncoding.EncodeToString(id[:]) + ".json"
+	if err := os.Remove(filepath.Join(cfg.CredentialsDir, filename)); err != nil {
+		t.Fatal(err)
+	}
+	h.reloadCredentials()
+	if w := login(); w.Code != http.StatusUnauthorized {
+		t.Fatal("removed credential can still log in")
+	}
+	r := httptest.NewRequest(http.MethodGet, "https://example.com/", nil)
+	r.AddCookie(sessionCookie)
+	if h.authenticate(discardLogger(), r) != nil {
+		t.Fatal("removed user's session is still accepted")
+	}
+}
+
+func TestPasskeyLogin(t *testing.T) {
+	h, cfg := newTestHandler(t, "http://127.0.0.1:1", nil)
+	a := newTestAuthenticator(t)
+	userID := userIDFromUsername("alice@example.com")
+	// Put the signing credential second to exercise passing all of a user's
+	// records to the library and handling a nonzero matched index.
+	for _, authenticator := range []*testAuthenticator{newTestAuthenticator(t), a} {
+		record := "$webauthn$v=1$" + base64.RawStdEncoding.EncodeToString(authenticator.authData(cfg.DomainDrawbridge, 5, true))
+		h.credentials["alice@example.com"] = append(h.credentials["alice@example.com"],
+			&credentialRecord{UserName: "alice@example.com", UserID: userID, Passkey: record})
+	}
+	for _, name := range []string{"valid_second_passkey", "no_presence", "no_verification", "wrong_origin", "wrong_rp", "wrong_challenge", "wrong_user", "missing_user", "wrong_key", "tampered_cookie", "expired_cookie"} {
+		t.Run(name, func(t *testing.T) {
+			challenge, cookie := passkeyBegin(t, h, pathAssertionBegin, map[string]any{})
+			rpID, origin, uid, flags, signer := cfg.DomainDrawbridge, "https://"+cfg.DomainDrawbridge, userID, byte(5), a
+			switch name {
+			case "no_presence":
+				flags = 4
+			case "no_verification":
+				flags = 1
+			case "wrong_origin":
+				origin = "https://other.example.com"
+			case "wrong_rp":
+				rpID = "other.example.com"
+			case "wrong_challenge":
+				challenge, _ = passkeyBegin(t, h, pathAssertionBegin, map[string]any{})
+			case "wrong_user":
+				uid = userIDFromUsername("hello@example.com")
+			case "missing_user":
+				uid = nil
+			case "wrong_key":
+				signer = newTestAuthenticator(t)
+				signer.id = a.id
+			case "tampered_cookie":
+				cookie.Value += "x"
+			case "expired_cookie":
+				c, err := cookieDecode[challengeCookieData](cookieNameChallenge, cookie.Value, cfg.key)
+				if err != nil {
+					t.Fatal(err)
+				}
+				c.Expires = uint32(time.Now().Add(-time.Minute).Unix())
+				cookie.Value, err = cookieEncode(cookieNameChallenge, c, cfg.key)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			w := passkeyPost(t, h, pathAssertionFinish, map[string]any{
+				"credential": signer.assertion(t, rpID, origin, challenge, uid, flags),
+				"next":       "https://attacker.example/",
+			}, cookie)
+			if name == "valid_second_passkey" {
+				if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "attacker.example") {
+					t.Fatalf("valid login or safe redirect failed: %d %s", w.Code, w.Body)
+				}
+			} else {
+				if w.Code != http.StatusUnauthorized && w.Code != http.StatusBadRequest {
+					t.Fatalf("invalid assertion accepted: %d %s", w.Code, w.Body)
+				}
+				for _, c := range w.Result().Cookies() {
+					if c.Name == cookieNameSession {
+						t.Fatal("failed login issued a session")
+					}
+				}
+			}
+		})
+	}
 }
 
 func TestDrawbridgeLoginServesHTMLAndHSTS(t *testing.T) {

@@ -1,0 +1,226 @@
+package passkey
+
+import (
+	"bytes"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"filippo.io/mldsa"
+)
+
+// NewLogin begins a login ceremony.
+//
+// optionsJSON is a PublicKeyCredentialRequestOptions object to be
+//
+//  1. parsed from JSON on the client side, then
+//  2. passed to PublicKeyCredential.parseRequestOptionsFromJSON(), and then
+//  3. passed to navigator.credentials.get() as the publicKey field.
+//
+// It can be used both for modal and for conditional UI (autofill) flows.
+//
+// request is an opaque value to be stored by the application (see
+// [Challenges], and [RequestID] for a storage key) and passed to Login.
+//
+// Note that, unless [LoginOptions.AllowCredentials] is set, a login ceremony
+// is not started for a specific user: the user is identified by the response,
+// using [Response.UnauthenticatedUserID].
+//
+// [Challenges]: #hdr-Challenges
+func (rp *RelyingParty) NewLogin(opts LoginOptions) (request, optionsJSON []byte, err error) {
+	allowed := credentialDescriptors(opts.AllowCredentials)
+	r := newLoginRequest(len(opts.AllowCredentials) > 0)
+	optionsJSON, err = json.Marshal(requestOptions{
+		Challenge:        base64.RawURLEncoding.EncodeToString(r.challenge[:]),
+		RPID:             rp.rpID,
+		AllowCredentials: allowed,
+		UserVerification: "required",
+		Timeout:          rp.timeout.Milliseconds(),
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("passkey: error encoding JSON: %w", err)
+	}
+	return r.Bytes(), optionsJSON, nil
+}
+
+// LoginOptions configures a login ceremony begun by [RelyingParty.NewLogin].
+//
+// The zero value is a valid, common configuration.
+type LoginOptions struct {
+	// AllowCredentials is a list of passkey records for a user that the application
+	// has already identified. It can be used e.g. for a re-authentication
+	// prompt before a sensitive operation in a signed-in session.
+	//
+	// The user's passkey records are communicated to the client so it
+	// offers only that user's credentials instead of an account picker.
+	// The user is identified by the application, not by the response:
+	// [Response.UnauthenticatedUserID] is empty when AllowCredentials is set,
+	// and the application must look up the user's records the same way
+	// it did to populate this field (e.g. from the session) and pass
+	// them to [RelyingParty.Login].
+	//
+	// The login options disclose the user's credential IDs to whoever receives it,
+	// so this field should be nil for a fully unauthenticated username.
+	AllowCredentials []string
+}
+
+type requestOptions struct {
+	Challenge        string                 `json:"challenge"`
+	RPID             string                 `json:"rpId"`
+	AllowCredentials []credentialDescriptor `json:"allowCredentials"`
+	UserVerification string                 `json:"userVerification"`
+	Timeout          int64                  `json:"timeout"`
+}
+
+// ErrRequestExpired is returned by [RelyingParty.Login] when the
+// response is valid but the request was created more than
+// [Options.Timeout] ago. Applications should discard the request and
+// retry the ceremony with a fresh one.
+//
+// It is always wrapped, so callers must use [errors.Is].
+var ErrRequestExpired = errors.New("passkey: login request expired")
+
+// ErrUnknownCredential is returned by [RelyingParty.Login] when the
+// response asserts a credential that is not among the provided passkey
+// records. It can be surfaced to the user as "this passkey was removed
+// from the account".
+//
+// It is always wrapped, so callers must use [errors.Is].
+var ErrUnknownCredential = errors.New("passkey: credential not registered for this user")
+
+// LoginResult is returned by [RelyingParty.Login] on a successful login.
+//
+// Unlike the [Response] methods, which return attacker-controlled
+// lookup keys, LoginResult fields are authenticated.
+type LoginResult struct {
+	// Matched is the index in passkeys of the record the response
+	// was verified against.
+	Matched int
+
+	// BackedUp reports whether the credential asserts it is currently
+	// backed up (e.g. synced to a cloud account). It can inform prompting
+	// the user to remove their password from the account, if any.
+	BackedUp bool
+}
+
+// Login verifies a login response against the request returned by
+// [RelyingParty.NewLogin] and the given user's passkey records.
+//
+// On success, it returns a [LoginResult] reporting the index in passkeys
+// of the record the response was verified against.
+//
+// Failures that call for special handling return sentinel errors and are
+// documented below. All other errors should be logged but not exposed
+// to the user.
+//
+//   - If the response is valid but matches none of
+//     passkeys, Login returns [ErrUnknownCredential]: the user asserted a
+//     credential the server no longer (or never) had a record of, for
+//     example one deleted from account settings but still present in the
+//     user's passkey provider.
+//
+//   - If the response is valid but the request is older than
+//     [Options.Timeout], Login returns [ErrRequestExpired]: the
+//     application can transparently retry with a fresh request, which is
+//     routine for conditional UI (autofill) prompts left idle.
+func (rp *RelyingParty) Login(response *Response, request []byte, passkeys []string) (*LoginResult, error) {
+	if response == nil {
+		return nil, errors.New("passkey: response is nil")
+	}
+	req, err := parseLoginRequest(request)
+	if err != nil {
+		return nil, err
+	}
+
+	if response.challenge != req.challenge {
+		return nil, errors.New("passkey: client data challenge does not match the request")
+	}
+	if response.origin != rp.origin {
+		return nil, fmt.Errorf("passkey: origin %q is not the expected value %q", response.origin, rp.origin)
+	}
+	rpIDHash := sha256.Sum256([]byte(rp.rpID))
+	if response.rpIDHash != rpIDHash {
+		return nil, errors.New("passkey: assertion for a different RP ID")
+	}
+
+	message := make([]byte, 0, len(response.authData)+len(response.clientDataHash))
+	message = append(message, response.authData...)
+	message = append(message, response.clientDataHash[:]...)
+
+	var skipped, signatureErrors []error
+	for i, p := range passkeys {
+		m, err := parseRecordMetadata(p)
+		if err != nil {
+			// Continue iterating, to avoid locking out an account
+			// due to a single bad record.
+			skipped = append(skipped, fmt.Errorf("%w (record #%d)", err, i))
+			continue
+		}
+		if m.rpIDHash != rpIDHash {
+			skipped = append(skipped, fmt.Errorf("record for a different RP ID (record #%d)", i))
+			continue
+		}
+		if !bytes.Equal(m.credentialID, response.credentialID) {
+			continue
+		}
+		r, err := parseRecord(p)
+		if err != nil {
+			skipped = append(skipped, fmt.Errorf("%w (record #%d)", err, i))
+			continue
+		}
+		if verifySignature(r.key, message, response.signature) {
+			if time.Since(req.created) > rp.timeout {
+				return nil, fmt.Errorf("%w: request created at %v", ErrRequestExpired, req.created)
+			}
+			if !userVerificationAvailable(r) {
+				return nil, errors.New("passkey: the matched record has the UP flag but not the UV flag, " +
+					"so user verification can't be relied upon")
+			}
+			if !response.flags.userVerified() {
+				return nil, errors.New("passkey: assertion has no user verification flag: " +
+					"the client did not honor the required user verification")
+			}
+			return &LoginResult{
+				Matched:  i,
+				BackedUp: response.flags.backupState(),
+			}, nil
+		}
+		// Continue iterating, in case two records have the same
+		// credential ID but different keys, and the one that actually
+		// signed the assertion is later in the list.
+		signatureErrors = append(signatureErrors,
+			fmt.Errorf("signature verification failed (record #%d)", i))
+	}
+
+	switch {
+	case len(signatureErrors) == 1:
+		return nil, fmt.Errorf("passkey: %v", signatureErrors[0])
+	case len(signatureErrors) > 1:
+		return nil, fmt.Errorf("passkey: multiple records matched the credential ID but none verified the signature: %v", signatureErrors)
+	case len(skipped) > 0:
+		return nil, fmt.Errorf("%w, and some records were skipped: %v", ErrUnknownCredential, skipped)
+	default:
+		return nil, fmt.Errorf("%w", ErrUnknownCredential)
+	}
+}
+
+func verifySignature(key crypto.PublicKey, message, sig []byte) bool {
+	switch key := key.(type) {
+	case *ecdsa.PublicKey:
+		digest := sha256.Sum256(message)
+		return ecdsa.VerifyASN1(key, digest[:], sig)
+	case *rsa.PublicKey:
+		digest := sha256.Sum256(message)
+		return rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], sig) == nil
+	case *mldsa.PublicKey:
+		return mldsa.Verify(key, message, sig, nil) == nil
+	default:
+		return false
+	}
+}

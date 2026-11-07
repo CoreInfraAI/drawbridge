@@ -3,14 +3,13 @@ module github.com/CoreInfraAI/drawbridge
 go 1.27.3
 
 require (
-	github.com/go-passkeys/go-passkeys v0.4.2-0.20251212170742-2852eb57c748
+	filippo.io/passkey v0.0.0-20261106191433-42274998ab83
 	golang.org/x/crypto v0.58.0
 	pgregory.net/rapid v1.3.0 // test-only
 )
 
 require (
+	filippo.io/mldsa v1.0.0 // indirect
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 )
-
-replace github.com/go-passkeys/go-passkeys => github.com/flyingmutant/go-passkeys v0.0.0-20260109202745-7585cf57fe48

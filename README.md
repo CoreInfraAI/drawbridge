@@ -118,7 +118,7 @@ Use [`drawbridge.service`](./drawbridge.service) to run Drawbridge in production
 ### 6. Enroll a WebAuthn credential
 
 1. Visit Drawbridge enroll page (`https://drawbridge.example.com/enroll`)
-2. Follow the browser prompts; the page will produce enrollment JSON
+2. Follow the browser prompts in an up-to-date browser; the page will produce enrollment JSON
 3. As an administrator, save it to a file and pass it to `-enroll`:
 
 ```sh
@@ -126,7 +126,7 @@ Use [`drawbridge.service`](./drawbridge.service) to run Drawbridge in production
 ```
 
 `-enroll` performs basic validation and writes the credential record into `credentials_dir` under a stable,
-filesystem-safe name (`<lower(username)>-<base64url(credential_id)>.json`). You can also skip `-enroll` and
+filesystem-safe name (`<lower(username)>-<base64url(sha256(passkey))>.json`). You can also skip `-enroll` and
 place a `*.json` credential record file into `credentials_dir` yourself.
 
 Send `SIGHUP` to the running Drawbridge process to reload credentials without restarting. (Config
